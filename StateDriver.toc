@@ -1,0 +1,12 @@
+## Interface: 11200
+## Title: StateDriver
+## Notes: Library that supplies a StateDriver implementation known from retail
+## Author: martinjlowm
+## Version: 1.0
+
+libs\LibStub\LibStub.lua
+libs\Sol\Sol.lua
+libs\Classy-1.0\Classy-1.0.lua
+
+StateDriver.lua
+parser.lua
