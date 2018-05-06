@@ -13,15 +13,28 @@ function SD:New(name, parent)
     return self[name]
 end
 
-local function GetAttribute(self, attr)
-    return self.__state_driver.attributes[attr]
+local function GetAttribute(self, prefix, name, suffix)
+    local attributes = self.__state_driver.attributes
+    local value
+
+    if not name and not suffix then
+        name = prefix
+    else
+        value = attributes[prefix .. name .. suffix]
+        value = value or attributes['*' .. name .. suffix]
+        value = value or attributes[prefix .. name .. '*']
+        value = value or attributes['*' .. name .. '*']
+    end
+
+    return value or attributes[name]
 end
 
 local function SetAttribute(self, attr, value)
+    local old_value = self.__state_driver.attributes[attr]
     self.__state_driver.attributes[attr] = value
 
     local func = self.__state_driver.handlers['OnAttributeChanged']
-    if func and type(func) == 'function' then
+    if func and type(func) == 'function' and value ~= old_value then
         func(self, attr, value)
     end
 end
@@ -29,84 +42,171 @@ end
 
 -- Figure out where to place this
 local function initPlayerDrop()
-    UnitPopup_ShowMenu(PlayerFrameDropDown, 'SELF', 'player')
-    if not (UnitInRaid('player') or GetNumPartyMembers() > 0) or UnitIsPartyLeader('player') and PlayerFrameDropDown.init then
-        UIDropDownMenu_AddButton({text = 'Reset Instances', func = ResetInstances, notCheckable = 1}, 1)
+    UnitPopup_ShowMenu(PlayerFrameDropDown, "SELF", "player")
+    if not (UnitInRaid("player") or GetNumPartyMembers() > 0) or UnitIsPartyLeader("player") and PlayerFrameDropDown.init and not CanShowResetInstances() then
+        UIDropDownMenu_AddButton({text = RESET_INSTANCES, func = ResetInstances, notCheckable = 1}, 1)
         PlayerFrameDropDown.init = nil
     end
 end
 
-local function initPartyDrop(self)
-    UnitPopup_ShowMenu(getglobal(UIDROPDOWNMENU_OPEN_MENU), "PARTY", self.unit, self.name, self.id)
+
+local ACTIONS = {}
+
+ACTIONS.target = function(self, unit, button)
+    if unit then
+        if unit == 'none' then
+            ClearTarget();
+        elseif ( SpellIsTargeting() ) then
+            SpellTargetUnit(unit);
+        elseif ( CursorHasItem() ) then
+            DropItemOnUnit(unit);
+        else
+            TargetUnit(unit);
+        end
+    end
 end
 
-local ToggleMenu = function(self)
-    if UnitIsUnit(self.unit, 'player') then
+ACTIONS.togglemenu = function(self, unit, button)
+    if UnitIsUnit(unit, 'player') then
         UIDropDownMenu_Initialize(PlayerFrameDropDown, initPlayerDrop, 'MENU')
+        PlayerFrameDropDown.init = true
         ToggleDropDownMenu(1, nil, PlayerFrameDropDown, 'cursor')
-    elseif self.unit == 'pet' then
+    elseif unit == 'pet' then
         ToggleDropDownMenu(1, nil, PetFrameDropDown, 'cursor')
-    elseif self.unit == 'target' then
+    elseif unit == 'target' then
         ToggleDropDownMenu(1, nil, TargetFrameDropDown, 'cursor')
-    elseif self.unitGroup == 'party' then
-        ToggleDropDownMenu(1, nil, _G['PartyMemberFrame' .. string.sub(self.unit,6) .. 'DropDown'], 'cursor')
-    elseif this.unitGroup == 'raid' then
+    elseif string.sub(unit, 1, 5) == 'party' then
+        ToggleDropDownMenu(1, nil, _G['PartyMemberFrame' .. string.sub(unit,6) .. 'DropDown'], 'cursor')
+    elseif string.sub(unit, 1, 4) == 'raid' then
         HideDropDownMenu(1)
 
         local menuFrame = FriendsDropDown
         menuFrame.displayMode = 'MENU'
         menuFrame.id = string.sub(this.unit,5)
-        menuFrame.unit = self.unit
+        menuFrame.unit = unit
         menuFrame.name = UnitName(this.unit)
-        menuFrame.initialize = initPartyDrop
+        menuFrame.initialize = function()
+            UnitPopup_ShowMenu(getglobal(UIDROPDOWNMENU_OPEN_MENU), "PARTY", self.unit, self.name, self.id)
+        end
 
         ToggleDropDownMenu(1, nil, FriendsDropDown, 'cursor')
     end
 end
 
-local attr_mappings = {
-    ['target'] = function(self) TargetUnit(self.unit) end,
-    ['togglemenu'] = ToggleMenu
-}
+ACTIONS.macro = function(self, unit, button)
+    local macro_text = self:GetAttribute('macrotext')
+    local spell, unit = SecureCmdOptionParse(macro_text)
+    CastSpellByName(spell, unit)
+end
 
-local function TriggerValue(self, value)
-    local func = attr_mappings[value]
-    if func and self.unit then
-        func(self)
+ACTIONS.spell = function(self, unit, button)
+    local spell = self:GetAttribute('spell')
+    CastSpellByName(spell)
+end
+
+ACTIONS.pet = function(self, unit, button)
+    local index = self:GetAttribute('pet')
+    CastPetAction(index, unit)
+end
+
+ACTIONS.func = function(self, unit, button)
+    local func = SlashCmdList[self:GetAttribute('func')]
+
+    if not func then
+        error(string.format('Slash command `%s` does not exist in SlashCmdList'))
+        return
+    end
+
+    func()
+end
+
+local link_pattern = '%[([^%]]+)%]'
+local function CmdItemParse(item)
+    local slot = tonumber(item)
+    if slot then
+        return nil, nil, slot
+    end
+
+    local link, name
+    for bag = 0, 4 do
+        for slot = 1, GetContainerNumSlots(bag) do
+            link = GetContainerItemLink(bag, slot)
+
+            if link then
+                name = string.match(link, link_pattern)
+                if name and name == item then
+                    return name, bag, slot
+                end
+            end
+        end
     end
 end
 
-local CLICK_TYPES = {
-    ['type'] = true,
-    ['type1'] = 'LeftButton',
-    ['type2'] = 'RightButton'
-}
+ACTIONS.item = function(self, unit, button)
+    local item = self:GetAttribute('item')
+
+    if item then
+        local name, bag, slot = CmdItemParse(item)
+        UseItem(name, bag, slot)
+    end
+end
+
+function UseItem(name, bag, slot)
+    if bag then
+        UseContainerItem(bag, slot)
+    elseif slot then
+        UseInventoryItem(slot)
+    end
+end
+
+ACTIONS.assign = function(self, unit, button)
+    local macro_text = self:GetAttribute('assign')
+    local symbol, unit = SecureCmdOptionParse(macro_text)
+    SetRaidTargetIcon(unit, symbol)
+end
+
+function Button_GetModifierPrefix(frame)
+    local prefix = ''
+    prefix = IsShiftKeyDown() and 'shift-' .. prefix or prefix
+    prefix = IsControlKeyDown() and 'ctrl-' .. prefix or prefix
+    return IsAltKeyDown() and 'alt-' .. prefix or prefix
+end
+
+function Button_GetButtonSuffix(button)
+    if button == 'LeftButton' then
+        return '1'
+    elseif button == 'RightButton' then
+        return '2'
+    elseif button == 'MiddleButton' then
+        return '3'
+    end
+
+    return '';
+end
+
+function Button_GetModifiedAttribute(frame, name, button, prefix, suffix)
+    if not prefix then
+        prefix = Button_GetModifierPrefix(frame)
+    end
+    if not suffix then
+        suffix = Button_GetButtonSuffix(button)
+    end
+
+    return frame:GetAttribute(prefix, name, suffix)
+end
+
 local function OnClick(self, button)
-    local value, valid
+    if not self.GetAttribute then return end
 
-    local alt = IsAltKeyDown() and 'alt-' or ''
-    local ctrl = IsControlKeyDown() and 'ctrl-' or ''
-    local shift = IsShiftKeyDown() and 'shift-' or ''
-    local modifiers = alt .. ctrl .. shift
+    local unit = self:GetAttribute('unit')
 
-    local prefix = '*'
-    while true do
-        -- Check any click combinations followed by modified/unmodified clicks
-        for click_type in next, CLICK_TYPES do
-            valid = CLICK_TYPES[click_type]
+    local action_type = Button_GetModifiedAttribute(self, 'type', button)
 
-            value = self:GetAttribute(prefix .. click_type)
-            if value and ((type(valid) == 'boolean' and valid) or (valid == button)) then
-                TriggerValue(self, value)
-                return
-            end
+    if action_type then
+        local handler = ACTIONS[action_type]
+        if handler and type(handler) == 'function' then
+            handler(self, unit, button)
         end
-
-        if prefix == modifiers then
-            return
-        end
-
-        prefix = modifiers
     end
 
 end
@@ -145,11 +245,44 @@ function CreateFrame(...)
     frame.GetAttribute = GetAttribute
     frame.SetAttribute = SetAttribute
 
-    frame:SetScript('OnClick', NOOP)
+    if frame:HasScript('OnClick') and not frame:GetScript('OnClick') then
+        frame:SetScript('OnClick', NOOP)
+    end
 
     return frame
 end
 
+local function Execute(frame, func)
+
+end
+
+local function WrapScript(frame, func)
+
+end
+
+local function UnwrapScript(frame, func)
+
+end
+
+local function ChildUpdate(frame, attr_snippet, value)
+    local children = { frame:GetChildren() }
+    local childUpdate
+
+    for _, child in next, children do
+        if child.GetAttribute then
+            childUpdate = child:GetAttribute('_childupdate-' .. attr_snippet)
+            if childUpdate then
+                childUpdate(child, value)
+            else
+                childUpdate = child:GetAttribute('_childupdate')
+                if childUpdate then
+                    childUpdate(child, value)
+                end
+            end
+            ChildUpdate(child, attr_snippet, value)
+        end
+    end
+end
 
 --
 -- SecureStateDriverManager
@@ -159,29 +292,33 @@ end
 
 -- Register a frame attribute to be set automatically with changes in game state
 function RegisterAttributeDriver(frame, attribute, values)
+    frame.Execute = Execute
+    frame.WrapScript = WrapScript
+    frame.UnwrapScript = UnwrapScript
+    frame.ChildUpdate = ChildUpdate
     if attribute and values and string.sub(attribute, 1, 1) ~= '_' then
-        Manager:SetAttribute('setframe', frame);
-        Manager:SetAttribute('setstate', attribute .. ' ' .. values);
+        Manager:SetAttribute('setframe', frame)
+        Manager:SetAttribute('setstate', attribute .. ' ' .. values)
     end
 end
 
 -- Unregister a frame from the state driver manager.
 function UnregisterAttributeDriver(frame, attribute)
     if attribute then
-        Manager:SetAttribute('setframe', frame);
-        Manager:SetAttribute('setstate', attribute);
+        Manager:SetAttribute('setframe', frame)
+        Manager:SetAttribute('setstate', attribute)
     else
-        Manager:SetAttribute('delframe', frame);
+        Manager:SetAttribute('delframe', frame)
     end
 end
 
 -- Bridge functions for compatibility
 function RegisterStateDriver(frame, state, values)
-    return RegisterAttributeDriver(frame, 'state-' .. state, values);
+    return RegisterAttributeDriver(frame, 'state-' .. state, values)
 end
 
 function UnregisterStateDriver(frame, state)
-    return UnregisterAttributeDriver(frame, 'state-' .. state);
+    return UnregisterAttributeDriver(frame, 'state-' .. state)
 end
 
 -- Register a frame to be notified when a unit's existence changes, the
@@ -190,83 +327,87 @@ end
 -- true and false. Otherwise it's via :Show() and :Hide()
 function RegisterUnitWatch(frame, asState)
     if asState then
-        Manager:SetAttribute('addwatchstate', frame);
+        Manager:SetAttribute('addwatchstate', frame)
     else
-        Manager:SetAttribute('addwatch', frame);
+        Manager:SetAttribute('addwatch', frame)
     end
 end
 
 -- Unregister a frame from the unit existence monitor.
 function UnregisterUnitWatch(frame)
-    SecureStateDriverManager:SetAttribute('removewatch', frame);
+    SecureStateDriverManager:SetAttribute('removewatch', frame)
 end
 
 --
 -- Private implementation
 --
-local secureAttributeDrivers = {};
-local unitExistsWatchers = {};
+local secureAttributeDrivers = {}
+local unitExistsWatchers = {}
 local unitExistsCache = setmetatable(
     {},
     { __index = function(t,k)
-          local v = UnitExists(k) or false;
-          t[k] = v;
-          return v;
+          local v = UnitExists(k) or false
+          t[k] = v
+          return v
     end
-});
-local STATE_DRIVER_UPDATE_THROTTLE = 0.2;
-local timer = 0;
+})
+local STATE_DRIVER_UPDATE_THROTTLE = 0.1
+local timer = 0
 
-local wipe = table.wipe;
+local wipe = table.wipe
 
 -- Check to see if a frame is registered
 function UnitWatchRegistered(frame)
-    return not (unitExistsWatchers[frame] == nil);
+    return not (unitExistsWatchers[frame] == nil)
 end
 
 local function SecureStateDriverManager_UpdateUnitWatch(frame, doState)
     -- Not really so secure, eh?
-    local unit = frame.unit;
-    local exists = (unit and unitExistsCache[unit]);
+    local unit = frame:GetAttribute('unit')
+    local exists = (unit and unitExistsCache[unit])
     if doState then
-        local attr = exists or false;
+        local attr = exists or false
         if frame:GetAttribute('state-unitexists') ~= attr then
-            frame:SetAttribute('state-unitexists', attr);
+            frame:SetAttribute('state-unitexists', attr)
         end
     else
         if exists then
-            frame:Show();
-            frame:SetAttribute('statehidden', nil);
+            frame:Show()
+            frame:SetAttribute('statehidden', nil)
         else
-            frame:Hide();
-            frame:SetAttribute('statehidden', true);
+            frame:Hide()
+            frame:SetAttribute('statehidden', true)
         end
     end
 end
 
-local pairs = pairs;
+local pairs = pairs
 
 -- consolidate duplicated code for footprint and maintainability
 local function resolveDriver(frame, attribute, values)
-    local newValue = SecureCmdOptionParse(values);
+    local newValue = SecureCmdOptionParse(values)
 
     if attribute == 'state-visibility' then
         if newValue == 'show' then
-            frame:Show();
-            frame:SetAttribute('statehidden', nil);
+            frame:Show()
+            frame:SetAttribute('statehidden', nil)
         elseif newValue == 'hide' then
-            frame:Hide();
-            frame:SetAttribute('statehidden', true);
+            frame:Hide()
+            frame:SetAttribute('statehidden', true)
         end
     elseif newValue then
         if newValue == 'nil' then
-            newValue = nil;
+            newValue = nil
         else
-            newValue = tonumber(newValue) or newValue;
+            newValue = tonumber(newValue) or newValue
         end
-        local oldValue = frame:GetAttribute(attribute);
+        local oldValue = frame:GetAttribute(attribute)
         if newValue ~= oldValue then
-            frame:SetAttribute(attribute, newValue);
+            frame:SetAttribute(attribute, newValue)
+            local onState = frame:GetAttribute('_on' .. attribute)
+            if onState then
+                onState(frame, attribute, newValue)
+            end
         end
     end
 end
@@ -299,7 +440,7 @@ end
 local function OnEvent()
     local self, event = this, arg1
 
-    timer = 0;
+    timer = 0
 end
 
 local function OnAttributeChanged(self, name, value)
@@ -317,12 +458,16 @@ local function OnAttributeChanged(self, name, value)
     elseif name == 'setstate' then
         local frame = self:GetAttribute('setframe')
         local attribute, values = string.match(value, '^(%S+)%s*(.*)$')
+
         if values == '' then
             secureAttributeDrivers[frame][attribute] = nil
         else
             secureAttributeDrivers[frame][attribute] = values
             resolveDriver(frame, attribute, values)
         end
+        -- Two frames registering with identical setstate fails unless the value
+        -- is reset afterwards
+        self:SetAttribute('setstate', nil)
     elseif name == 'addwatch' or name == 'addwatchstate' then
         local doState = (name == 'addwatchstate')
         unitExistsWatchers[value] = doState
@@ -338,22 +483,22 @@ end
 
 Manager = SD:New('Manager')
 Manager:SetScript('OnUpdate', OnUpdate)
-Manager:SetScript('OnEvent', OnEvent);
-Manager:SetScript('OnAttributeChanged', OnAttributeChanged);
+Manager:SetScript('OnEvent', OnEvent)
+Manager:SetScript('OnAttributeChanged', OnAttributeChanged)
 
 -- Events that trigger early rescans
-Manager:RegisterEvent('MODIFIER_STATE_CHANGED');
-Manager:RegisterEvent('ACTIONBAR_PAGE_CHANGED');
-Manager:RegisterEvent('UPDATE_BONUS_ACTIONBAR');
-Manager:RegisterEvent('PLAYER_ENTERING_WORLD');
-Manager:RegisterEvent('UPDATE_SHAPESHIFT_FORM');
-Manager:RegisterEvent('UPDATE_STEALTH');
-Manager:RegisterEvent('PLAYER_TARGET_CHANGED');
-Manager:RegisterEvent('PLAYER_FOCUS_CHANGED');
-Manager:RegisterEvent('PLAYER_REGEN_DISABLED');
-Manager:RegisterEvent('PLAYER_REGEN_ENABLED');
-Manager:RegisterEvent('UNIT_PET');
-Manager:RegisterEvent('GROUP_ROSTER_UPDATE');
+Manager:RegisterEvent('MODIFIER_STATE_CHANGED')
+Manager:RegisterEvent('ACTIONBAR_PAGE_CHANGED')
+Manager:RegisterEvent('UPDATE_BONUS_ACTIONBAR')
+Manager:RegisterEvent('PLAYER_ENTERING_WORLD')
+Manager:RegisterEvent('UPDATE_SHAPESHIFT_FORM')
+Manager:RegisterEvent('UPDATE_STEALTH')
+Manager:RegisterEvent('PLAYER_TARGET_CHANGED')
+Manager:RegisterEvent('PLAYER_FOCUS_CHANGED')
+Manager:RegisterEvent('PLAYER_REGEN_DISABLED')
+Manager:RegisterEvent('PLAYER_REGEN_ENABLED')
+Manager:RegisterEvent('UNIT_PET')
+Manager:RegisterEvent('GROUP_ROSTER_UPDATE')
 -- Deliberately ignoring mouseover and others' target changes because they change so much
 
 _G['SecureStateDriverManager'] = Manager

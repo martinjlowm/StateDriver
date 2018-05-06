@@ -5,14 +5,44 @@ if not SD then return end
 
 local Parser = SD:New('Parser')
 
+local IsMounted = IsMounted
+local IsStealthed = IsStealthed
+local GetShapeshiftForm = GetShapeshiftForm
+
+local _G = getfenv(0)
+local function IsInShapeshiftForm(index)
+    return GetShapeshiftForm() == tonumber(index)
+end
+
+
 function Parser:Initialize()
     self.casting = nil
+    self.channel_spell = nil
     self.channeling = nil
 
+    self:RegisterEvent('PLAYER_ENTERING_WORLD')
     self:RegisterEvent('SPELLCAST_START')
     self:RegisterEvent('SPELLCAST_CHANNEL_START')
     self:RegisterEvent('SPELLCAST_STOP')
     self:RegisterEvent('SPELLCAST_CHANNEL_STOP')
+    -- self:SetScript('OnEvent', function() self[event](self) end)
+end
+
+local _CastSpellByName
+local Hooked_CastSpellByName = function(spell, unit)
+    if spell then
+        self.channel_spell = spell
+        _CastSpellByName(spell, unit)
+    end
+end
+
+local HOOKED = false
+function Parser:PLAYER_ENTERING_WORLD()
+    if not HOOKED then
+        _CastSpellByName = CastSpellByName
+        CastSpellByName = Hooked_CastSpellByName
+        HOOKED = true
+    end
 end
 
 function Parser:SPELLCAST_START()
@@ -20,7 +50,7 @@ function Parser:SPELLCAST_START()
 end
 
 function Parser:SPELLCAST_CHANNEL_START()
-    self.channeling = arg1
+    self.channeling = true
 end
 
 function Parser:SPELLCAST_STOP()
@@ -28,17 +58,18 @@ function Parser:SPELLCAST_STOP()
 end
 
 function Parser:SPELLCAST_CHANNEL_STOP()
+    self.channel_spell = nil
     self.channeling = false
 end
 
 local conditions_map, casting, existence, hostility
 do
     local function IsChanneling(dependency)
-        return dependency and dependency == gxMacroConditions.channeling or gxMacroConditions.channeling
+        return dependency and dependency == Parser.channeling or Parser.channeling
     end
 
     local function IsCasting(dependency)
-        return dependency and dependency == gxMacroConditions.casting or gxMacroConditions.casting
+        return dependency and dependency == Parser.casting or Parser.casting
     end
 
     local function IsMouseOverUnit()
@@ -47,9 +78,18 @@ do
         is_mouseover = UnitName('mouseover') and 'mouseover'
 
         local frame = GetMouseFocus()
+        if frame and frame.GetAttribute then
+            is_mouseover = is_mouseover or frame:GetAttribute('unit')
+        end
         is_mouseover = is_mouseover or frame and frame.unit
 
         return is_mouseover
+    end
+
+    local function modifierCondition(dependency)
+        dependency = dependency == 'ctrl' and 'control' or dependency
+        local modifier = string.gsub(dependency, "^%l", string.upper)
+        return _G['Is' .. modifier .. 'KeyDown']()
     end
 
     -- Rename dependent?
@@ -90,7 +130,11 @@ do
             else
                 return (not in_raid) and (not in_party)
             end
-        end
+        end,
+        ['mod'] = modifierCondition,
+        ['modifier'] = modifierCondition,
+        ['form'] = IsInShapeshiftForm,
+        ['stance'] = IsInShapeshiftForm
     }
 
     existence = {
@@ -98,9 +142,11 @@ do
         ['noexists'] = function(unit)
             return not UnitExists(unit)
         end,
-        ['dead'] = UnitIsDead,
+        ['dead'] = function(unit)
+            return UnitIsDead(unit) and not UnitAura(unit, 'Feign Death')
+        end,
         ['nodead'] = function(unit)
-            return not UnitIsDead(unit)
+            return not (UnitIsDead(unit) and not UnitAura(unit, 'Feign Death'))
         end,
     }
 
@@ -129,16 +175,15 @@ do
 
         ['combat'] = UnitAffectingCombat,
 
-        -- ['mounted'] = IsMounted,
+        ['mounted'] = IsMounted,
         -- ['indoors'] = IsIndoors,
         -- ['outdoors'] = IsOutdoors,
-        -- ['stealth'] = IsStealthed,
+        ['stealth'] = IsStealthed,
         -- ['swimming'] = IsSwimming,
 
-        -- Modifiers
-        ['shift'] = IsShiftKeyDown,
-        ['ctrl'] = IsControlKeyDown,
-        ['alt'] = IsAltKeyDown
+        ['bonusbar'] = function(bar_id)
+            return false
+        end,
     }
 
     for k, v in next, casting do conditions_map[k] = v end
